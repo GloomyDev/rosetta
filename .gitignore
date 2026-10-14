@@ -1,0 +1,18 @@
+# Local Yomitan data backup taken before side-loading the patched build (~1.1 GB)
+.yomitan-backup
+
+# .NET build output
+bin/
+obj/
+*.user
+
+# Upstream clones and build artefacts. All three are reproducible: clone Yomitan at the
+# tagged version, apply patches/profileIndex.patch, and run the Edge build. Keeping them
+# out avoids nested git repos and ~16 MB of generated extension files in the tree.
+tools/yomitan/
+tools/yomitan-api/
+tools/yomitan-patched/
+node_modules/
+
+# WebView2 user data
+*.webview2/

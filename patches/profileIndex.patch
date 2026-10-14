@@ -1,0 +1,103 @@
+Add optional profileIndex to the termEntries API path
+
+Upstream `termEntries` always resolves against `optionsFull.profileCurrent`, so an
+external client cannot choose which Yomitan profile a lookup runs against. For a
+multi-language client this means a lookup cannot be directed at the right language:
+a profile configured for Japanese will not deinflect "running" into "run".
+
+This mirrors the existing `ankiCardFormats` case in the same switch block, which
+already accepts an optional `profileIndex` and falls back to the current profile,
+so the request shape and the fallback behaviour stay consistent across paths.
+Omitting `profileIndex` preserves the current behaviour exactly.
+
+File: ext/js/comm/yomitan-api.js
+
+--- a/ext/js/comm/yomitan-api.js
++++ b/ext/js/comm/yomitan-api.js
+@@ -165,26 +165,32 @@
+                     case 'termEntries': {
+                         /** @type {import('yomitan-api.js').termEntriesInput} */
+                         // @ts-expect-error - Allow this to error
+-                        const {term} = parsedBody;
++                        const {term, profileIndex} = parsedBody;
++                        const resolvedProfileIndex = typeof profileIndex === 'number' ? profileIndex : optionsFull.profileCurrent;
++                        if (typeof optionsFull.profiles[resolvedProfileIndex] === 'undefined') {
++                            throw new Error('Invalid input for termEntries, expected "profileIndex" to be a valid profile index but got ' + profileIndex);
++                        }
+                         if (typeof term === 'string') {
+                             const invokeParams = {
+                                 text: term,
+                                 details: {},
+-                                optionsContext: {index: optionsFull.profileCurrent},
++                                optionsContext: {index: resolvedProfileIndex},
+                             };
+                             result = {...await this._invoke('termsFind', invokeParams), index: 0};
+                         } else if (Array.isArray(term)) {
+                             result = await Promise.all(term.map(async (text, index) => {
+                                 const invokeParams = {
+                                     text,
+                                     details: {},
+-                                    optionsContext: {index: optionsFull.profileCurrent},
++                                    optionsContext: {index: resolvedProfileIndex},
+                                 };
+                                 return {
+                                     ...(await this._invoke('termsFind', invokeParams)),
+                                     index,
+                                 };
+                             }));
+                         } else {
+                             throw new Error('Invalid input for termEntries, expected "term" to be a string or a string array but got ' + typeof term);
+                         }
+                         break;
+                     }
+
+Also update the input type in types/ext/yomitan-api.d.ts:
+
+    termEntriesInput: {
+        term: string | string[];
+        profileIndex?: number;
+    }
+
+And docs/api_paths/termEntries.md in yomidevs/yomitan-api, adding to Request Options:
+
+    - `profileIndex` (`number`): (Optional) The index of the Yomitan profile to look
+      the term up against. Defaults to the currently active profile.
+
+`ankiFields` needs the same treatment, and for the same reason. A client that
+resolves a term against profile 1 and then renders it through `ankiFields` gets the
+glossary for whatever profile happens to be active, so a correct English definition
+is replaced a moment later by a Japanese one. Observed in practice before this hunk
+was added.
+
+--- a/ext/js/comm/yomitan-api.js
++++ b/ext/js/comm/yomitan-api.js
+@@ -212,10 +212,14 @@
+                     case 'ankiFields': {
+-                        const {text, type, markers, maxEntries, includeMedia} = parsedBody;
++                        const {text, type, markers, maxEntries, includeMedia, profileIndex} = parsedBody;
+                         const includeAudioMedia = includeMedia && markers.includes('audio');
+ 
+-                        const profileOptions = optionsFull.profiles[optionsFull.profileCurrent].options;
++                        const ankiFieldsProfileIndex = typeof profileIndex === 'number' ? profileIndex : optionsFull.profileCurrent;
++                        if (typeof optionsFull.profiles[ankiFieldsProfileIndex] === 'undefined') {
++                            throw new Error('Invalid input for ankiFields, expected "profileIndex" to be a valid profile index but got ' + profileIndex);
++                        }
++                        const profileOptions = optionsFull.profiles[ankiFieldsProfileIndex].options;
+ 
+                         const ankiTemplate = await this._getAnkiTemplate(profileOptions);
+-                        let dictionaryEntries = await this._getDictionaryEntries(text, type, optionsFull.profileCurrent);
++                        let dictionaryEntries = await this._getDictionaryEntries(text, type, ankiFieldsProfileIndex);
+
+And in types/ext/yomitan-api.d.ts, ankiFieldsInput gains `profileIndex?: number;`.
+
+Note: `kanjiEntries` still hardcodes `optionsFull.profileCurrent`. It is untouched here
+only because the tool does not yet call it; the same fix applies.
+
+Verification (requires a browser with Yomitan running and the API enabled):
+
+    curl -s -X POST http://127.0.0.1:19633/termEntries \
+      -d '{"term":"corriendo","profileIndex":2}' | head -c 400
+
+Against a Spanish profile this should resolve to "correr"; against the Japanese
+profile at index 0 it should return no entries. If both return the same result,
+the patch is not loaded.
