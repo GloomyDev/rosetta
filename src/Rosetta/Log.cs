@@ -1,4 +1,4 @@
-namespace Tango;
+namespace Rosetta;
 
 /// <summary>
 /// Console tracing. The popup is invisible when it goes wrong, so there has to be

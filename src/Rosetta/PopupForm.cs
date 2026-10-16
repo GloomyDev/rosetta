@@ -4,7 +4,7 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace Tango;
+namespace Rosetta;
 
 /// <summary>
 /// FR-11 / FR-12 / NFR-03. A WebView2 surface that shows dictionary entries over
@@ -86,7 +86,7 @@ internal sealed class PopupForm : Form
         try
         {
             var env = await CoreWebView2Environment.CreateAsync(
-                userDataFolder: Path.Combine(Path.GetTempPath(), "tango-webview2"));
+                userDataFolder: Path.Combine(Path.GetTempPath(), "rosetta-webview2"));
             await _web.EnsureCoreWebView2Async(env);
 
             var s = _web.CoreWebView2.Settings;
@@ -155,6 +155,13 @@ internal sealed class PopupForm : Form
     public void SetHtml(string html)
     {
         if (!_ready) { _pending = html; return; }
+        if (_suspended)
+        {
+            // Resume is implicit on the next navigation, but calling it explicitly keeps
+            // the first paint after a hide from stalling behind renderer startup.
+            try { _web.CoreWebView2.Resume(); } catch { /* not suspended after all */ }
+            _suspended = false;
+        }
         _web.NavigateToString(html);
     }
 
@@ -195,10 +202,34 @@ internal sealed class PopupForm : Form
         SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE);
     }
 
+    /// <summary>
+    /// NFR-08. Hiding the window leaves the WebView2 renderer process fully resident -
+    /// tens of MB that never came back after the popup closed. Navigating away releases
+    /// the document, and TrySuspend lets WebView2 release the renderer itself. Both are
+    /// undone lazily on the next show.
+    /// </summary>
     public void HidePopup()
     {
-        if (Visible) Visible = false;
+        if (!Visible) return;
+        Visible = false;
+
+        if (!_ready) return;
+        try
+        {
+            _web.CoreWebView2.Navigate("about:blank");
+            // Suspend only once the blank page has settled; suspending mid-navigation
+            // fails and would leave the renderer resident anyway.
+            BeginInvoke(() =>
+            {
+                try { _ = _web.CoreWebView2.TrySuspendAsync(); }
+                catch (Exception ex) { Log.Write($"suspend failed: {ex.Message}"); }
+            });
+            _suspended = true;
+        }
+        catch (Exception ex) { Log.Write($"hide cleanup failed: {ex.Message}"); }
     }
+
+    private bool _suspended;
 
     public bool ContainsScreenPoint(Point p) => Visible && Bounds.Contains(p);
 

@@ -1,4 +1,4 @@
-# System-Wide Pop-up Dictionary — Requirements
+# Rosetta — System-Wide Pop-up Dictionary — Requirements
 
 Oct 14, 2026 · @ぺぺ
 
@@ -23,6 +23,7 @@ It must work for Japanese, English and Spanish from day one, choosing the langua
   5. The browser must be restarted after the native host is registered; Edge only reads host registrations at startup.
 - **The API host cannot read chunked request bodies.** It reads the body strictly by `Content-Length`. A .NET client using `PostAsJsonAsync`/`JsonContent` streams without one and the host answers `500 "{}"` for every call. Serialize the payload first and send it as a `StringContent`. Verified 2026-10-14: identical payload, chunked → 500 (4 bytes), `Content-Length: 35` → 200 (119,732 bytes).
 - **The API host serializes requests.** It is a ~117-line passthrough built on Python's single-threaded `http.server`; a stalled native-messaging round trip blocks every request behind it. This drives the timeout and single-flight rules in NFR-10.
+- **Cross-language uses one profile per SOURCE language, not one per direction pair.** A profile's `language` setting drives deinflection and is keyed to the source; the target is merely which dictionary is enabled, and a profile may enable several at once. So three profiles cover all directions between three languages (one per pair would need nine), and a cross-language answer costs no extra round trip. Coverage is asymmetric: `→en` is best everywhere, `en→ja` is adequate (4.2 MB), `ja→es` is 0.1 MB and effectively empty, so Japanese→Spanish should be expected to route through English.
 - **`/termEntries` is an unstable internal format.** Its own documentation states that "no guarantees are made for the stability or accuracy of the responses". Pin a known-good Yomitan version and confine all knowledge of this shape to one adapter class.
 - **Teams is the new desktop client** (`ms-teams.exe`, WebView2/Chromium). The web version is explicitly not a target.
 - **No OCR in the core path.** Scanned PDFs without a text layer are handled only by the optional fallback in Out of scope.
@@ -64,7 +65,7 @@ This is the binding constraint on NFR-01. Both calls plus EN/ES disambiguation d
 
 ### Measured full chain (Word, 2026-10-14)
 
-29 Shift-hovers in Microsoft Word over mixed Japanese, English and Spanish text, via `spike/TangoSpike`. Cold first probe excluded and reported separately.
+29 Shift-hovers in Microsoft Word over mixed Japanese, English and Spanish text, via `spike/RosettaSpike`. Cold first probe excluded and reported separately.
 
 | Stage | p50 | p95 | max |
 | --- | --- | --- | --- |
@@ -94,24 +95,26 @@ The Must rows define v1: Shift-hover lookup with automatic language detection in
 | ID | Area | Requirement | Priority |
 | --- | --- | --- | --- |
 | FR-01 | Trigger | Holding Shift activates scanning; the modifier key is configurable. | Must |
-| FR-02 | Trigger | The keyboard hook observes Shift but never consumes it, so typing and Shift+click are unaffected. | Must |
+| FR-02 | Trigger | The keyboard hook observes Shift but never consumes it, so typing and Shift+click are unaffected. **Clarified after field use:** not consuming Shift is not sufficient — holding Shift to type a capital fired lookups wherever the mouse was parked. Scanning is suppressed while any non-modifier key is down and for 400 ms afterwards (one `GetKeyboardState` call per loop). The stationary re-probe used for nested lookup is exempt, since it only runs while the cursor is over the popup, where typing does not happen. | Must |
 | FR-03 | Trigger | A scan runs only after the cursor rests for a configurable delay (default 50 ms). | Must |
 | FR-04 | Capture | Get the text range at the cursor with `RangeFromPoint`, then extend forward up to N characters (default 16), stopping at the end of the line. **For non-Japanese spans, re-range with `TextUnit.Word` first**: forward-only extension clips the word whenever the cursor lands mid-word ("construcción" captures as "onstrucción"). Forward-only remains correct for Japanese, which is what Yomitan does. | Must |
-| FR-05 | Capture | When `TextPattern` is unavailable, fall back to the element's `Name` and pick the word from the cursor's position in its bounding box. **Promoted to Must:** measured on Teams, sent messages (`fui-ChatMyMessage`) expose no `TextPattern` at all and carry their text only in `Name`. Without this fallback a large share of Teams is unreadable. | Must |
+| FR-05 | Capture | **Walk up to five ancestors for a `TextPattern` before falling back.** On Chromium content the element under the cursor is usually a styled span or Group with no text pattern while the text sits on an ancestor; without the walk nearly all web content took the degraded path and yielded one word. Only then fall back to the element's `Name` and pick the word from the cursor's position in its bounding box. **Promoted to Must:** measured on Teams, sent messages (`fui-ChatMyMessage`) expose no `TextPattern` at all and carry their text only in `Name`. Without this fallback a large share of Teams is unreadable. | Must |
 | FR-06 | Capture | Return the screen rectangles of the matched text so it can be highlighted, sized to `maxOriginalTextLength` from the lookup. | Should |
 | FR-07 | Capture | Per-app allow/deny list by process name. **Note:** Teams text belongs to the child process `msedgewebview2.exe`, not `ms-teams.exe` — any allow-list keyed on the latter would match nothing. Resolve the owning top-level window rather than trusting the process of the element under the cursor. | Should |
 | FR-08 | Lookup | Query `/termEntries` for matched length and entry identity, then `/ankiFields` for display HTML. Render progressively: the popup appears on the `/termEntries` result and is enriched when `/ankiFields` lands. Cap `maxEntries` at 3. | Must |
 | FR-09 | Lookup | Manual language override from the tray or a hotkey, overriding the automatic choice for the current app until cleared. | Should |
 | FR-10 | Lookup | **Choose the language automatically** from the captured text and query the matching Yomitan profile. See *Language detection* below. | Must |
-| FR-11 | Popup | Show the popup next to the matched text, kept fully on screen, flipping above or left near edges. | Must |
+| FR-11 | Popup | Show the popup next to the matched text, kept fully on screen, flipping above or left near edges. **Validate the anchor:** `GetBoundingRectangles` may return several rectangles and next to an inline image the first can be the image's box, empty or implausibly large. Prefer the rectangle containing the cursor, reject zero-area / over-120px-tall / off-monitor ones, and fall back to a caret-sized box at the cursor. Taking index 0 unchecked is what sent the popup to the screen edge. | Must |
 | FR-12 | Popup | Render readings, definitions, frequency and pitch data in a WebView2 page. A fast first paint from the `/termEntries` JSON, replaced in place by the `/ankiFields` markers with Yomitan's dictionary CSS applied and `dictionaryMedia` inlined. | Must |
 | FR-13 | Popup | Draw a highlight over the matched word in the source app. | Should |
-| FR-14 | Popup | Close on Esc, on a click elsewhere, or when the cursor leaves both the word and the popup. | Must |
+| FR-14 | Popup | Close on Esc, on **any keystroke** (starting to type means the user has moved on from reading, and the popup would otherwise sit over what they are now writing — modifiers excluded, so holding the scan key does not self-dismiss), on a click elsewhere, or when the cursor leaves both the word and the popup. A click *inside* the popup must not dismiss: that is how Back is operated. | Must |
 | FR-15 | Popup | Shift-hover inside the popup looks up words in the definitions (nested lookup). **Implemented** in-page rather than through UIA: the popup's own script uses `caretRangeFromPoint` for exact offsets and posts to the host, reusing the FR-04 forward-scan rule so nested lookups behave like top-level ones. Navigation replaces content in place with a back stack, rather than stacking windows as Yomitan does. | Could |
 | FR-16 | Popup | Add the word to Anki through AnkiConnect, with the source sentence. Cheaper than it looks: `/ankiCardFormats` and `/ankiFields` already do the rendering. | Could |
 | FR-17 | System | Tray icon with on/off toggle, Yomitan API status, detected language and settings. | Must |
 | FR-18 | System | Settings for modifier key, scan delay, scan length, popup size, font, theme and the language-to-profile mapping. | Should |
 | FR-19 | System | Optional start with Windows. | Could |
+| FR-15b | Capture | A mouse selection of up to 100 characters is looked up as a single term, so two-word concepts work. Read via `TextPattern.GetSelection()`; honoured only when the cursor is inside the selection, so a stale selection elsewhere cannot hijack lookups. Longer selections are ignored — that is a translation request, not a dictionary query. | Should |
+| FR-19c | Capture | A cursor resting on whitespace produces no lookup. `RangeFromPoint` snaps to the nearest character, so pointing at a gap previously captured the word to its right. | Must |
 | FR-19b | Capture | Sanitise the captured span before lookup: cut at the first newline (message boundaries in Teams otherwise bleed into the next message), and strip U+FFFC object-replacement characters emitted for avatars and inline images. | Must |
 | FR-20 | System | Fail honestly. The tray and the popup distinguish *API offline* (naming which link in the chain is down), *no text under the cursor*, and *no dictionary match*. Never fail silently. | Must |
 
@@ -163,7 +166,7 @@ v1 excludes everything that needs OCR or a non-Windows OS.
 
 v1 is done when every box below is ticked; the first one gates all implementation work.
 
-- [x] **Spike harness built (2026-10-14):** `spike/TangoSpike`, .NET 10 + FlaUI.UIA3, per-monitor DPI v2. `TangoSpike api` passes all backend checks; `TangoSpike hover` performs the UIA capture test.
+- [x] **Spike harness built (2026-10-14):** `spike/RosettaSpike`, .NET 10 + FlaUI.UIA3, per-monitor DPI v2. `RosettaSpike api` passes all backend checks; `RosettaSpike hover` performs the UIA capture test.
 - [x] **Feasibility spike — Word (2026-10-14):** `TextPattern` confirmed on the Word document body; capture, matched length and bounding rectangles all correct.
 - [x] **Feasibility spike — Teams (2026-10-14):** `TextPattern` confirmed on chat message content with no renderer flag required. Japanese (今度 → こんど) and English both resolve. Partial coverage: sent messages need the `Name` fallback.
 - [x] **Feasibility spike — PDF (2026-10-14):** `TextPattern` confirmed in Edge's PDF viewer on a Japanese text-layer PDF, with bounding rectangles. Long compounds match correctly (公益財団法人, 6 characters).

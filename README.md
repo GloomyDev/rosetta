@@ -1,4 +1,4 @@
-# Tango
+# Rosetta
 
 A system-wide pop-up dictionary for Windows. Hold Shift, hover a word in a native desktop app, and see a Yomitan-style dictionary popup — the same experience Yomitan gives you in the browser.
 
@@ -14,7 +14,7 @@ First targets: Microsoft Word (desktop), Microsoft Teams (new desktop client) an
 4. The local Yomitan API returns the entries and rendered HTML.
 5. A non-focus-stealing WebView2 popup shows the result next to the word.
 
-Tango reads real on-screen text. It is not an OCR tool for games, images or video.
+Rosetta reads real on-screen text. It is not an OCR tool for games, images or video.
 
 ## Requirements
 

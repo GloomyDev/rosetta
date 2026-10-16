@@ -2,7 +2,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace Tango;
+namespace Rosetta;
 
 internal static class Program
 {
@@ -14,9 +14,57 @@ internal static class Program
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point p);
     [DllImport("kernel32.dll")] private static extern bool AttachConsole(int pid);
 
+    /// <summary>
+    /// FR-02. Shift is held for two unrelated reasons: scanning, and typing a capital.
+    /// Without this check, typing a capitalised sentence fires a lookup wherever the
+    /// mouse happens to be parked.
+    ///
+    /// This MUST use GetAsyncKeyState, not GetKeyboardState. The latter reports the
+    /// calling thread's input queue, and the scan thread has no message queue at all,
+    /// so it always came back empty and this check silently did nothing - the debug
+    /// trace caught lookups firing on text in the terminal while the user typed.
+    /// </summary>
+    private static bool IsTyping()
+    {
+        foreach (int vk in TypingKeys)
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Keys that mean "the user is writing", deliberately excluding every modifier and
+    /// mouse button. Scanning the full 0x08-0xFE range each tick would be wasteful;
+    /// this is the set that actually produces text.
+    /// </summary>
+    private static readonly int[] TypingKeys = BuildTypingKeys();
+
+    private static int[] BuildTypingKeys()
+    {
+        var keys = new List<int>();
+        for (int vk = 0x30; vk <= 0x39; vk++) keys.Add(vk);   // 0-9
+        for (int vk = 0x41; vk <= 0x5A; vk++) keys.Add(vk);   // A-Z
+        for (int vk = 0x60; vk <= 0x69; vk++) keys.Add(vk);   // numpad 0-9
+        for (int vk = 0xBA; vk <= 0xC0; vk++) keys.Add(vk);   // ;=,-./`
+        for (int vk = 0xDB; vk <= 0xDE; vk++) keys.Add(vk);   // []\'
+        keys.Add(0x20);                                        // space
+        keys.Add(0x08);                                        // backspace
+        keys.Add(0x0D);                                        // enter
+        keys.Add(0x09);                                        // tab
+        keys.Add(0x2E);                                        // delete
+        return [.. keys];
+    }
+
     // FR-03. 20ms matches the user's own tuned Yomitan config rather than the 50ms the
     // requirements originally guessed at.
     private const int RestDelayMs = 20;
+
+    // How long after the last keystroke scanning stays suppressed (FR-02).
+    private const int TypingCooldownMs = 400;
+
+    // How long Shift must be held ALONE before scanning arms, when the pointer has not
+    // moved. Typing presses Shift and the letter almost together and releases quickly,
+    // so Shift effectively never sits alone this long while writing.
+    private const int ShiftDwellMs = 200;
 
     private static PopupForm _popup = null!;
     private static readonly Yomitan Api = new();
@@ -67,12 +115,59 @@ internal static class Program
         var rest = System.Diagnostics.Stopwatch.StartNew();
         bool shownForCurrentWord = false;
         var nestedProbeIdle = System.Diagnostics.Stopwatch.StartNew();
+        var typingCooldown = new System.Diagnostics.Stopwatch();
+
+        // FR-02 arming state. Shift means two different things - "look this up" and
+        // "type a capital" - and they are told apart by how Shift is held, not by
+        // whether it is held.
+        var shiftHeld = new System.Diagnostics.Stopwatch();
+        bool shiftWasDown = false;
+        bool typingDuringHold = false;
+        Point shiftDownAt = default;
 
         while (true)
         {
             if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) { Hide(); Thread.Sleep(50); continue; }
 
+            // Poll typing on EVERY iteration, before anything can short-circuit. The
+            // previous version checked this only inside the Shift branch, so ordinary
+            // typing - where Shift is released for all but the capital - was invisible
+            // to it and the cooldown never restarted.
+            bool typingNow = IsTyping();
+            if (typingNow)
+            {
+                typingCooldown.Restart();
+
+                // FR-14. Any keystroke dismisses. Starting to type is an unambiguous
+                // signal that the user has moved on from reading, and leaving the popup
+                // up means it sits over whatever they are now writing. Modifiers are
+                // excluded by IsTyping(), so holding Shift to scan does not self-dismiss.
+                if (_popup.Visible) Hide();
+            }
+
             bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+            if (shift && !shiftWasDown)
+            {
+                // Shift just went down: start a fresh hold.
+                shiftHeld.Restart();
+                typingDuringHold = typingNow;
+                GetCursorPos(out shiftDownAt);
+            }
+            else if (!shift && shiftWasDown)
+            {
+                shiftHeld.Reset();
+                typingDuringHold = false;
+            }
+            else if (shift && typingNow)
+            {
+                // A keystroke anywhere in this hold disqualifies it, and stays
+                // disqualifying until Shift is released - otherwise a long capitalised
+                // run would satisfy the dwell partway through.
+                typingDuringHold = true;
+            }
+            shiftWasDown = shift;
+
             if (!shift)
             {
                 // FR-14: a click ELSEWHERE dismisses. A click inside the popup must not -
@@ -112,6 +207,28 @@ internal static class Program
             }
             _lastNestedProbe = Point.Empty;
 
+            // FR-02. Scanning arms only when this Shift hold looks like an intent to
+            // read rather than to write:
+            //   - no keystroke at any point during the hold, and the cooldown elapsed
+            //   - AND either Shift has been down alone for the dwell, OR the pointer has
+            //     moved since Shift went down
+            // Movement counts because the mouse does not move while typing, so the
+            // common flow (hold Shift, sweep across text) stays instant and the dwell is
+            // paid only when pressing Shift with the pointer already parked.
+            if (typingDuringHold ||
+                (typingCooldown.IsRunning && typingCooldown.ElapsedMilliseconds < TypingCooldownMs))
+            {
+                Thread.Sleep(15);
+                continue;
+            }
+
+            bool movedSinceShift = pt != shiftDownAt;
+            if (!movedSinceShift && shiftHeld.ElapsedMilliseconds < ShiftDwellMs)
+            {
+                Thread.Sleep(10);
+                continue;
+            }
+
             if (pt == last)
             {
                 if (!shownForCurrentWord && rest.ElapsedMilliseconds >= RestDelayMs)
@@ -132,6 +249,40 @@ internal static class Program
 
             Thread.Sleep(5);
         }
+    }
+
+    /// <summary>
+    /// FR-11. GetBoundingRectangles can return several rectangles, and next to an
+    /// inline image the first one may be the image's box, empty, or implausibly large.
+    /// Taking Rects[0] unchecked is what sent the popup to the screen edge: ShowFor
+    /// then flipped against a bogus anchor. Prefer the rectangle the cursor is actually
+    /// in, reject nonsense, and fall back to a caret-sized box at the cursor.
+    /// </summary>
+    private static Rectangle PickAnchor(Rectangle[] rects, Point cursor)
+    {
+        var screen = Screen.FromPoint(cursor).Bounds;
+        Rectangle best = Rectangle.Empty;
+        long bestDistance = long.MaxValue;
+
+        foreach (var r in rects)
+        {
+            if (r.Width <= 0 || r.Height <= 0) continue;      // empty
+            if (r.Height > 120) continue;                      // taller than ~3 lines: not a word
+            if (!screen.IntersectsWith(r)) continue;           // not on the cursor's monitor
+
+            if (r.Contains(cursor)) return r;
+
+            long dx = cursor.X < r.Left ? r.Left - cursor.X : cursor.X > r.Right ? cursor.X - r.Right : 0;
+            long dy = cursor.Y < r.Top ? r.Top - cursor.Y : cursor.Y > r.Bottom ? cursor.Y - r.Bottom : 0;
+            long d = dx * dx + dy * dy;
+            if (d < bestDistance) { bestDistance = d; best = r; }
+        }
+
+        // Anything further than ~200px from the cursor is not the word being pointed at.
+        if (best.IsEmpty || bestDistance > 200 * 200)
+            return new Rectangle(cursor.X, cursor.Y, 1, 18);
+
+        return best;
     }
 
     private static Rectangle Inflated(Rectangle r)
@@ -173,7 +324,9 @@ internal static class Program
 
         // NFR-10. The API host serializes requests, so a queue would compound latency.
         // A newer hover cancels the one in flight instead.
-        _inflight?.Cancel();
+        var previous = _inflight;
+        previous?.Cancel();
+        previous?.Dispose();          // each CTS holds a timer registration; leaked otherwise
         var cts = new CancellationTokenSource();
         _inflight = cts;
 
@@ -184,7 +337,15 @@ internal static class Program
     {
         try
         {
-            var anchor = cap.Rects.Length > 0 ? cap.Rects[0] : Rectangle.Empty;
+            var anchor = PickAnchor(cap.Rects, pt);
+
+            if (IsPepe(cap.Term))
+            {
+                Log.Write("  easter egg");
+                Show(Html.Pepe(), anchor, pt);
+                _lastTerm = cap.Term;
+                return;
+            }
 
             Lookup? hit;
             if (Lang.IsJapanese(cap.Span))
@@ -198,7 +359,17 @@ internal static class Program
             }
 
             if (ct.IsCancellationRequested) return;
-            if (hit is null) { Log.Write($"  no entry for \"{Clip(cap.Term)}\""); return; }
+            if (hit is null)
+            {
+                // FR-20. Leaving the previous entry on screen makes a failed lookup look
+                // like a WRONG lookup: hovering "bag" with no match still showed "this"
+                // from the hover before it, which reads as the tool grabbing the wrong
+                // word. Say there is no match instead.
+                Log.Write($"  no entry for \"{Clip(cap.Term)}\"");
+                Show(Html.Message($"No entry for “{cap.Term}”", LangNameOf(_stickyProfile)), anchor, pt);
+                _lastTerm = cap.Term;
+                return;
+            }
             Log.Write($"  -> {hit.Term} ({hit.Reading}) profile={hit.ProfileIndex} match={hit.MatchedLength} anchor={anchor}");
 
             _lastTerm = cap.Term;
@@ -235,6 +406,18 @@ internal static class Program
         }
     }
 
+    private static bool IsPepe(string term) =>
+        term.Trim().Equals("pepe", StringComparison.OrdinalIgnoreCase) ||
+        term.Trim() == "ぺぺ";
+
+    private static string? LangNameOf(int profile) => profile switch
+    {
+        Lang.Japanese => "Japanese",
+        Lang.English => "English",
+        Lang.Spanish => "Spanish",
+        _ => null,
+    };
+
     private static string Clip(string s) => s.Length <= 24 ? s : s[..24] + "...";
 
     // ------------------------------------------------------------- FR-15 nested lookup
@@ -242,6 +425,7 @@ internal static class Program
     // Rendered pages behind the current one. Storing the HTML rather than the query
     // makes Back instant and, more importantly, exact: re-running the lookup could
     // return something different if the user has changed profiles meanwhile.
+    private const int MaxNestDepth = 10;   // matches Yomitan's popupNestingMaxDepth
     private static readonly List<string> History = [];
     private static string _currentHtml = "";
 
@@ -270,7 +454,9 @@ internal static class Program
             if (term.Length == 0) return;
 
             Log.Write($"nested lookup \"{Clip(term)}\"");
-            _inflight?.Cancel();
+            var prev = _inflight;
+            prev?.Cancel();
+            prev?.Dispose();
             var cts = new CancellationTokenSource();
             _inflight = cts;
             _ = Task.Run(() => NestedAsync(term, span, cts.Token), cts.Token);
@@ -295,6 +481,7 @@ internal static class Program
             if (ct.IsCancellationRequested || hit is null) { Log.Write($"  nested: no entry"); return; }
 
             // Push the page we are leaving, then paint the new one one level deeper.
+            if (History.Count >= MaxNestDepth) History.RemoveAt(0);
             History.Add(_currentHtml);
             int depth = History.Count;
             Log.Write($"  nested -> {hit.Term} (depth {depth})");
@@ -378,6 +565,8 @@ internal static class Program
         }
         _anchor = Rectangle.Empty;
         _lastTerm = "";
+        History.Clear();          // each entry holds ~8KB of rendered HTML
+        _currentHtml = "";
         _popup.HidePopup();
     }
 }

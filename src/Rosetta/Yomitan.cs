@@ -2,7 +2,18 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 
-namespace Tango;
+namespace Rosetta;
+
+/// <summary>
+/// One dictionary's worth of definitions. A profile may have several dictionaries
+/// enabled at once - an English profile carrying wty-en-en, wty-en-ja and wty-en-es
+/// answers "what does this mean" and "how do I say it in Japanese" from a single
+/// lookup, which is what makes cross-language scale without a profile per direction.
+/// </summary>
+internal sealed record DefinitionGroup(
+    string Dictionary,
+    string? TargetLanguage,
+    IReadOnlyList<string> Glosses);
 
 /// <summary>One lookup result, enough to paint the popup and highlight the source text.</summary>
 internal sealed record Lookup(
@@ -12,6 +23,7 @@ internal sealed record Lookup(
     string Dictionary,
     IReadOnlyList<string> InflectionRules,
     IReadOnlyList<string> PlainGlosses,
+    IReadOnlyList<DefinitionGroup> Groups,
     int ProfileIndex);
 
 /// <summary>
@@ -105,23 +117,65 @@ internal sealed class Yomitan
                 }
             }
 
+            // Keep EVERY definition group, not just the first: with several dictionaries
+            // enabled on one profile, the later groups are the other-language
+            // equivalents, which is the whole point of cross-language lookup.
             string dict = "";
-            var glosses = new List<string>();
-            if (e.TryGetProperty("definitions", out var defs) && defs.GetArrayLength() > 0)
+            var groups = new List<DefinitionGroup>();
+            if (e.TryGetProperty("definitions", out var defs))
             {
-                var d = defs[0];
-                dict = d.TryGetProperty("dictionary", out var dn) ? dn.GetString() ?? "" : "";
-                if (d.TryGetProperty("entries", out var ents))
-                    foreach (var ent in ents.EnumerateArray())
-                        CollectText(ent, glosses);
+                foreach (var d in defs.EnumerateArray())
+                {
+                    string name = d.TryGetProperty("dictionary", out var dn) ? dn.GetString() ?? "" : "";
+                    if (dict.Length == 0) dict = name;
+
+                    var glosses = new List<string>();
+                    if (d.TryGetProperty("entries", out var ents))
+                        foreach (var ent in ents.EnumerateArray())
+                            CollectText(ent, glosses);
+
+                    var trimmed = Trim(glosses);
+                    if (trimmed.Count == 0) continue;
+
+                    var existing = groups.FindIndex(g => g.Dictionary == name);
+                    if (existing >= 0)
+                    {
+                        var merged = new List<string>(groups[existing].Glosses);
+                        foreach (var g in trimmed) if (!merged.Contains(g)) merged.Add(g);
+                        groups[existing] = groups[existing] with { Glosses = merged };
+                    }
+                    else
+                    {
+                        groups.Add(new DefinitionGroup(name, TargetLanguageOf(name), trimmed));
+                    }
+                }
             }
 
-            return new Lookup(headTerm, reading, matched, dict, rules, Trim(glosses), profileIndex);
+            var first = groups.Count > 0 ? groups[0].Glosses : [];
+            return new Lookup(headTerm, reading, matched, dict, rules, first, groups, profileIndex);
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Which language a dictionary's glosses are written in. Wiktionary exports are
+    /// named wty-{source}-{target}; Jitendex is Japanese headwords glossed in English.
+    /// Returns null when the naming gives nothing away, in which case the UI just shows
+    /// the dictionary name rather than guessing.
+    /// </summary>
+    private static string? TargetLanguageOf(string dictionary)
+    {
+        if (dictionary.StartsWith("wty-", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = dictionary.Split('-');
+            if (parts.Length >= 3 && parts[2].Length >= 2) return parts[2][..2].ToLowerInvariant();
+        }
+        if (dictionary.StartsWith("Jitendex", StringComparison.OrdinalIgnoreCase)) return "en";
+        if (dictionary.StartsWith("JMdict", StringComparison.OrdinalIgnoreCase)) return "en";
+        return null;
     }
 
     /// <summary>

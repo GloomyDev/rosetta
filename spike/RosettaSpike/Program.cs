@@ -8,7 +8,7 @@ using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.UIA3;
 
-namespace TangoSpike;
+namespace RosettaSpike;
 
 /// <summary>
 /// Feasibility spike for the system-wide pop-up dictionary (requirements.md, Step 3).
@@ -47,6 +47,9 @@ internal static class Program
                     return CheckApi().GetAwaiter().GetResult() ? 0 : 1;
                 case "hover":
                     HoverLoop();
+                    return 0;
+                case "diag":
+                    DiagLoop();
                     return 0;
                 case "all":
                 default:
@@ -233,6 +236,171 @@ internal static class Program
         Header("Summary: TextPattern support by process");
         foreach (var (proc, ok) in seenProcesses)
             Console.WriteLine($"  {(ok ? "ok   " : "FAIL ")} {proc,-20} {(ok ? "TextPattern available" : "NO TextPattern - needs the Name fallback (FR-05)")}");
+    }
+
+    // ------------------------------------------------- Part B: can UIA give exact web text?
+
+    /// <summary>
+    /// Answers one question: on real web pages, can we get a text range that resolves at
+    /// the cursor AND returns bounding rectangles? If yes, Rosetta's estimation paths can
+    /// be deleted. If no - or if Firefox exposes nothing usable - a browser extension is
+    /// the only way to match Yomitan's accuracy, which matters because ~90% of use is in
+    /// the browser.
+    /// </summary>
+    private static void DiagLoop()
+    {
+        Header("UIA text-range diagnostic - hold SHIFT and hover; ESC to quit");
+        Console.WriteLine("  Try: a heading, body paragraph text, a link, and styled/nested markup.");
+        Console.WriteLine("  Run this in Edge, Chrome and Firefox and compare.");
+        Console.WriteLine();
+
+        using var automation = new UIA3Automation();
+        var summary = new Dictionary<string, (int Hovers, int LeafTp, int AncestorTp, int DocTp, int WithRects)>();
+        Point last = default;
+        var sinceLast = Stopwatch.StartNew();
+
+        while (true)
+        {
+            if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) break;
+            if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0) { Thread.Sleep(15); continue; }
+            if (!GetCursorPos(out var pt)) { Thread.Sleep(15); continue; }
+            if (pt == last || sinceLast.ElapsedMilliseconds < 400) { Thread.Sleep(15); continue; }
+            last = pt; sinceLast.Restart();
+
+            Diagnose(automation, pt, summary);
+        }
+
+        Header("Summary by process");
+        Console.WriteLine($"  {"process",-18} {"hovers",6} {"leaf TP",8} {"ancestor",9} {"Document",9} {"w/ rects",9}");
+        foreach (var (proc, s) in summary)
+            Console.WriteLine($"  {proc,-18} {s.Hovers,6} {s.LeafTp,8} {s.AncestorTp,9} {s.DocTp,9} {s.WithRects,9}");
+        Console.WriteLine();
+        Console.WriteLine("  'Document' > 0 with 'w/ rects' > 0 means UIA can replace estimation (Part C).");
+        Console.WriteLine("  All zeros in a browser means that browser needs the extension (Part D).");
+    }
+
+    private static void Diagnose(UIA3Automation automation, Point pt,
+        Dictionary<string, (int, int, int, int, int)> summary)
+    {
+        string proc = "?";
+        int leafTp = 0, ancestorTp = 0, docTp = 0, withRects = 0;
+
+        try
+        {
+            var swElem = Stopwatch.StartNew();
+            var element = automation.FromPoint(pt);
+            swElem.Stop();
+            if (element is null) return;
+
+            try { proc = Process.GetProcessById(element.Properties.ProcessId.Value).ProcessName; }
+            catch { }
+
+            string leafType = element.Properties.ControlType.ValueOrDefault.ToString();
+            var leafPattern = element.Patterns.Text.PatternOrDefault;
+            leafTp = leafPattern is not null ? 1 : 0;
+            Console.WriteLine($"  [{proc}] leaf={leafType} textPattern={(leafTp == 1 ? "YES" : "no")}  ({swElem.ElapsedMilliseconds}ms)");
+
+            // How far up is the nearest text pattern, and what kind of node is it?
+            var swWalk = Stopwatch.StartNew();
+            AutomationElement? firstWithText = null;
+            int firstDepth = -1;
+            AutomationElement? document = null;
+            int documentDepth = -1;
+
+            try
+            {
+                var walker = automation.TreeWalkerFactory.GetControlViewWalker();
+                var cur = walker.GetParent(element);
+                for (int depth = 1; depth <= 30 && cur is not null; depth++)
+                {
+                    bool hasText = cur.Patterns.Text.PatternOrDefault is not null;
+                    var type = cur.Properties.ControlType.ValueOrDefault;
+
+                    if (hasText && firstWithText is null) { firstWithText = cur; firstDepth = depth; }
+                    if (type == ControlType.Document && hasText) { document = cur; documentDepth = depth; break; }
+                    cur = walker.GetParent(cur);
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"          walk failed: {ex.GetType().Name}"); }
+            swWalk.Stop();
+
+            if (firstWithText is not null)
+            {
+                ancestorTp = 1;
+                Console.WriteLine($"          nearest textPattern: depth {firstDepth} " +
+                                  $"({firstWithText.Properties.ControlType.ValueOrDefault})  ({swWalk.ElapsedMilliseconds}ms)");
+                if (firstDepth > 5)
+                    Console.WriteLine($"          -> BEYOND the app's 5-level cap: this is why it falls back to guessing");
+            }
+            else
+            {
+                Console.WriteLine($"          no textPattern within 30 ancestors  ({swWalk.ElapsedMilliseconds}ms)");
+            }
+
+            // The decisive test: a document-wide range resolved at the cursor.
+            var target = document ?? firstWithText;
+            int targetDepth = document is not null ? documentDepth : firstDepth;
+            if (target is not null)
+            {
+                if (document is not null) docTp = 1;
+                var tp = target.Patterns.Text.Pattern;
+                var swRange = Stopwatch.StartNew();
+                try
+                {
+                    var range = tp.RangeFromPoint(pt);
+                    if (range is not null)
+                    {
+                        range.ExpandToEnclosingUnit(TextUnit.Character);
+                        string ch = range.GetText(4) ?? "";
+                        var charRects = range.GetBoundingRectangles();
+
+                        var wordRange = range.Clone();
+                        wordRange.ExpandToEnclosingUnit(TextUnit.Word);
+                        string word = (wordRange.GetText(64) ?? "").Replace("\r", "").Replace("\n", "\\n");
+                        var wordRects = wordRange.GetBoundingRectangles();
+                        swRange.Stop();
+
+                        if (charRects.Length > 0 || wordRects.Length > 0) withRects = 1;
+
+                        bool contains = false;
+                        foreach (var r in wordRects)
+                            if (r.Contains(pt)) { contains = true; break; }
+
+                        Console.WriteLine($"          range from {(document is not null ? "Document" : "ancestor")} " +
+                                          $"depth {targetDepth}: char={Show(ch)} word=\"{Trim(word, 24)}\"");
+                        Console.WriteLine($"          rects: char={charRects.Length} word={wordRects.Length} " +
+                                          $"containsCursor={(contains ? "YES" : "no")}  ({swRange.ElapsedMilliseconds}ms)");
+                    }
+                    else
+                    {
+                        swRange.Stop();
+                        Console.WriteLine($"          RangeFromPoint returned null  ({swRange.ElapsedMilliseconds}ms)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    swRange.Stop();
+                    Console.WriteLine($"          range failed: {ex.GetType().Name}: {Trim(ex.Message, 50)}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [{proc}] diagnose failed: {ex.GetType().Name}: {Trim(ex.Message, 60)}");
+        }
+
+        var prev = summary.TryGetValue(proc, out var v) ? v : (0, 0, 0, 0, 0);
+        summary[proc] = (prev.Item1 + 1, prev.Item2 + leafTp, prev.Item3 + ancestorTp,
+                         prev.Item4 + docTp, prev.Item5 + withRects);
+    }
+
+    private static string Show(string s)
+    {
+        if (s.Length == 0) return "(empty)";
+        char c = s[0];
+        if (c == ' ') return "' ' (space)";
+        if (c == '\r' || c == '\n') return "(newline)";
+        return $"'{c}'";
     }
 
     private static void Probe(UIA3Automation automation, Point pt, Dictionary<string, bool> seen)

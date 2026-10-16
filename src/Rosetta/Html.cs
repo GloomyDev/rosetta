@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text;
 
-namespace Tango;
+namespace Rosetta;
 
 /// <summary>
 /// FR-12. Two paints: a fast one from /termEntries so the popup appears on the ~25ms
@@ -36,8 +36,15 @@ internal static class Html
           background: var(--tagbg); color: var(--muted); white-space: nowrap;
         }
         .tag.infl { color: var(--accent); }
-        .glosses { margin: 0; padding-left: 1.2em; }
+        .glosses { margin: 0 0 6px; padding-left: 1.2em; }
         .glosses li { margin: 2px 0; }
+        .grouphdr { display: flex; align-items: center; gap: 6px; margin: 8px 0 3px; }
+        .langtag {
+          font-size: 10px; font-weight: 700; letter-spacing: .04em;
+          padding: 1px 5px; border-radius: 3px;
+          background: var(--accent); color: #fff;
+        }
+        .dictname { font-size: 11px; color: var(--muted); }
         .dict { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--rule);
                 font-size: 11px; color: var(--muted); }
         .pending { color: var(--muted); font-style: italic; font-size: 12px; }
@@ -186,12 +193,23 @@ internal static class Html
             sb.Append("</div>");
         }
 
-        if (l.PlainGlosses.Count > 0)
+        if (l.Groups.Count > 0)
         {
-            sb.Append("<ul class=\"glosses\">");
-            foreach (var g in l.PlainGlosses)
-                sb.Append("<li>").Append(E(g)).Append("</li>");
-            sb.Append("</ul>");
+            foreach (var group in l.Groups)
+            {
+                // One section per dictionary. With cross-language dictionaries enabled
+                // on the same profile, the later sections are the equivalents in the
+                // other profile languages - all from a single lookup.
+                sb.Append("<div class=\"grouphdr\">");
+                if (group.TargetLanguage is { } lang)
+                    sb.Append("<span class=\"langtag\">").Append(E(lang.ToUpperInvariant())).Append("</span>");
+                sb.Append("<span class=\"dictname\">").Append(E(group.Dictionary)).Append("</span></div>");
+
+                sb.Append("<ul class=\"glosses\">");
+                foreach (var g in group.Glosses)
+                    sb.Append("<li>").Append(E(g)).Append("</li>");
+                sb.Append("</ul>");
+            }
         }
         else
         {
@@ -226,6 +244,25 @@ internal static class Html
         sb.Append("<div class=\"dict\">").Append(E(l.Dictionary))
           .Append(" · ").Append(LangName(l.ProfileIndex)).Append("</div>");
         return Page(sb.ToString(), depth);
+    }
+
+    /// <summary>
+    /// Easter egg. Deliberately an exact match, never a substring, so it cannot fire on
+    /// an ordinary word that happens to contain it. Content is a placeholder - the
+    /// author still wants to decide what goes here.
+    /// </summary>
+    public static string Pepe(int depth = 0)
+    {
+        const string body = """
+            <div class="head"><span class="term">ぺぺ</span>
+            <span class="reading">pepe</span></div>
+            <div class="tags"><span class="tag infl">easter egg</span></div>
+            <ul class="glosses">
+              <li>The author of this tool.</li>
+              <li><em>Placeholder &mdash; decide what actually goes here.</em></li>
+            </ul>
+            """;
+        return Page(body, depth);
     }
 
     /// <summary>FR-20: say which state this is, never fail silently.</summary>
