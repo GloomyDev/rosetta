@@ -2,8 +2,6 @@
   <img src="assets/rosetta-banner.png" alt="Rosetta" width="420">
 </p>
 
-# Rosetta
-
 A system-wide pop-up dictionary for Windows. Hold Shift, hover a word in a native desktop app, and see a Yomitan-style dictionary popup — the same experience Yomitan gives you in the browser.
 
 First targets: Microsoft Word (desktop), Microsoft Teams (new desktop client) and PDF viewers. Japanese, English and Spanish work from day one, and the language is picked automatically from the text under the cursor.
