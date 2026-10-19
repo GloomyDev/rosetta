@@ -47,6 +47,10 @@ internal static class Html
         .dictname { font-size: 11px; color: var(--muted); }
         .dict { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--rule);
                 font-size: 11px; color: var(--muted); }
+        .tr { white-space: pre-wrap; font-size: 15px; line-height: 1.5; margin: 4px 0 6px; }
+        details.orig { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+        details.orig summary { cursor: default; }
+        details.orig div { white-space: pre-wrap; margin-top: 3px; }
         .pepe { display: block; width: 100%; border-radius: 6px; margin: 8px 0 2px; }
         a.ext { color: var(--accent); text-decoration: underline; cursor: pointer; }
         .pending { color: var(--muted); font-style: italic; font-size: 12px; }
@@ -247,6 +251,28 @@ internal static class Html
         sb.Append(glossary);
         sb.Append("<div class=\"dict\">").Append(E(l.Dictionary))
           .Append(" · ").Append(LangName(l.ProfileIndex)).Append("</div>");
+        return Page(sb.ToString(), depth);
+    }
+
+    /// <summary>
+    /// Translation of a selection. The translated text sits in ordinary text nodes, so the
+    /// page script's nested lookup works on it with no extra code. The original is kept
+    /// collapsed underneath. The footer says plainly that this one is online.
+    /// </summary>
+    public static string Translation(string original, Translator.Result r, bool truncated, int depth = 0)
+    {
+        var sb = new StringBuilder();
+        sb.Append("<div class=\"tags\"><span class=\"tag infl\">")
+          .Append(E(Translator.LanguageName(r.Detected))).Append(" &rarr; ")
+          .Append(E(Translator.LanguageName(r.Target))).Append("</span></div>");
+        sb.Append("<div class=\"tr\">").Append(E(r.Text)).Append("</div>");
+        sb.Append("<details class=\"orig\"><summary>Original</summary><div>")
+          .Append(E(original)).Append("</div></details>");
+        if (truncated)
+            sb.Append("<div class=\"pending\">Only the first ").Append(Translator.MaxChars)
+              .Append(" characters were translated.</div>");
+        sb.Append("<div class=\"dict\">Google Translate &middot; online, not local &middot; ")
+          .Append("hold Shift over a word to look it up</div>");
         return Page(sb.ToString(), depth);
     }
 
