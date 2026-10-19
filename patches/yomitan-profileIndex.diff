@@ -1,0 +1,73 @@
+diff --git a/ext/js/comm/yomitan-api.js b/ext/js/comm/yomitan-api.js
+index f020465..db728bd 100644
+--- a/ext/js/comm/yomitan-api.js
++++ b/ext/js/comm/yomitan-api.js
+@@ -165,12 +165,16 @@ export class YomitanApi {
+                     case 'termEntries': {
+                         /** @type {import('yomitan-api.js').termEntriesInput} */
+                         // @ts-expect-error - Allow this to error
+-                        const {term} = parsedBody;
++                        const {term, profileIndex} = parsedBody;
++                        const resolvedProfileIndex = typeof profileIndex === 'number' ? profileIndex : optionsFull.profileCurrent;
++                        if (typeof optionsFull.profiles[resolvedProfileIndex] === 'undefined') {
++                            throw new Error('Invalid input for termEntries, expected "profileIndex" to be a valid profile index but got ' + profileIndex);
++                        }
+                         if (typeof term === 'string') {
+                             const invokeParams = {
+                                 text: term,
+                                 details: {},
+-                                optionsContext: {index: optionsFull.profileCurrent},
++                                optionsContext: {index: resolvedProfileIndex},
+                             };
+                             result = {...await this._invoke('termsFind', invokeParams), index: 0};
+                         } else if (Array.isArray(term)) {
+@@ -178,7 +182,7 @@ export class YomitanApi {
+                                 const invokeParams = {
+                                     text,
+                                     details: {},
+-                                    optionsContext: {index: optionsFull.profileCurrent},
++                                    optionsContext: {index: resolvedProfileIndex},
+                                 };
+                                 return {
+                                     ...(await this._invoke('termsFind', invokeParams)),
+@@ -208,13 +212,17 @@ export class YomitanApi {
+                     case 'ankiFields': {
+                         /** @type {import('yomitan-api.js').ankiFieldsInput} */
+                         // @ts-expect-error - Allow this to error
+-                        const {text, type, markers, maxEntries, includeMedia} = parsedBody;
++                        const {text, type, markers, maxEntries, includeMedia, profileIndex} = parsedBody;
+                         const includeAudioMedia = includeMedia && markers.includes('audio');
+ 
+-                        const profileOptions = optionsFull.profiles[optionsFull.profileCurrent].options;
++                        const ankiFieldsProfileIndex = typeof profileIndex === 'number' ? profileIndex : optionsFull.profileCurrent;
++                        if (typeof optionsFull.profiles[ankiFieldsProfileIndex] === 'undefined') {
++                            throw new Error('Invalid input for ankiFields, expected "profileIndex" to be a valid profile index but got ' + profileIndex);
++                        }
++                        const profileOptions = optionsFull.profiles[ankiFieldsProfileIndex].options;
+ 
+                         const ankiTemplate = await this._getAnkiTemplate(profileOptions);
+-                        let dictionaryEntries = await this._getDictionaryEntries(text, type, optionsFull.profileCurrent);
++                        let dictionaryEntries = await this._getDictionaryEntries(text, type, ankiFieldsProfileIndex);
+                         if (maxEntries > 0) {
+                             dictionaryEntries = dictionaryEntries.slice(0, maxEntries);
+                         }
+diff --git a/types/ext/yomitan-api.d.ts b/types/ext/yomitan-api.d.ts
+index bd931d1..b44ad5a 100644
+--- a/types/ext/yomitan-api.d.ts
++++ b/types/ext/yomitan-api.d.ts
+@@ -19,6 +19,7 @@ import type * as Dictionary from './dictionary';
+ 
+ export type termEntriesInput = {
+     term: string | string[];
++    profileIndex?: number;
+ };
+ 
+ export type termEntriesResponse = {
+@@ -37,6 +38,7 @@ export type ankiFieldsInput = {
+     markers: [string];
+     maxEntries: number;
+     includeMedia?: boolean;
++    profileIndex?: number;
+ };
+ 
+ export type tokenizeInput = {

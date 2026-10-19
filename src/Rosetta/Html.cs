@@ -47,6 +47,8 @@ internal static class Html
         .dictname { font-size: 11px; color: var(--muted); }
         .dict { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--rule);
                 font-size: 11px; color: var(--muted); }
+        .pepe { display: block; width: 100%; border-radius: 6px; margin: 8px 0 2px; }
+        a.ext { color: var(--accent); text-decoration: underline; cursor: pointer; }
         .pending { color: var(--muted); font-style: italic; font-size: 12px; }
 
         /* Yomitan's own rendered glossary (second paint). */
@@ -140,6 +142,8 @@ internal static class Html
           document.addEventListener('click', function (ev) {
             const b = ev.target && ev.target.closest && ev.target.closest('.back');
             if (b) { ev.preventDefault(); send({ action: 'back' }); }
+            const x = ev.target && ev.target.closest && ev.target.closest('a.ext');
+            if (x) { ev.preventDefault(); send({ action: 'open' }); }
           });
 
           // The host drives this when Shift is held over the popup. The page cannot
@@ -246,21 +250,41 @@ internal static class Html
         return Page(sb.ToString(), depth);
     }
 
+    private static string? _pepePhoto;
+
+    private static string PepePhoto()
+    {
+        if (_pepePhoto is not null) return _pepePhoto;
+        using var stream = typeof(Html).Assembly.GetManifestResourceStream("p01.jpg");
+        if (stream is null) return _pepePhoto = "";
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        return _pepePhoto = "data:image/jpeg;base64," + Convert.ToBase64String(ms.ToArray());
+    }
+
     /// <summary>
-    /// Easter egg. Deliberately an exact match, never a substring, so it cannot fire on
-    /// an ordinary word that happens to contain it. Content is a placeholder - the
-    /// author still wants to decide what goes here.
+    /// Easter egg. Deliberately an exact match, never a substring (see Program.IsPepe),
+    /// so it cannot fire on an ordinary word that happens to contain it. The link is
+    /// handled by the host ("open" message): the popup itself must never navigate.
     /// </summary>
     public static string Pepe(int depth = 0)
     {
-        const string body = """
+        string photo = PepePhoto();
+        string img = photo.Length == 0 ? "" :
+            $"<img class=\"pepe\" src=\"{photo}\" alt=\"\">";
+        string body = $"""
             <div class="head"><span class="term">ぺぺ</span>
             <span class="reading">pepe</span></div>
             <div class="tags"><span class="tag infl">easter egg</span></div>
             <ul class="glosses">
               <li>The author of this tool.</li>
-              <li><em>Placeholder &mdash; decide what actually goes here.</em></li>
+              <li>Feel free to check my personal blog:
+                  <a class="ext" href="#">www.joselopezchapa.com</a></li>
+              <li>Be sure to leave me a message in the guestbook!</li>
             </ul>
+            <div class="dict">Thanks for using my tool, I hope you have been finding it
+            useful and that you recommend it to your friends.</div>
+            {img}
             """;
         return Page(body, depth);
     }

@@ -16,3 +16,10 @@ node_modules/
 
 # WebView2 user data
 *.webview2/
+
+# Installer build output
+installer/publish/
+installer/Output/
+
+# Internal design notes, kept local
+requirements.md

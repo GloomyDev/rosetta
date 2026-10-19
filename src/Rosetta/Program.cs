@@ -66,6 +66,9 @@ internal static class Program
     // so Shift effectively never sits alone this long while writing.
     private const int ShiftDwellMs = 200;
 
+    /// <summary>Toggled from the tray menu; the scan loop idles while false.</summary>
+    internal static volatile bool Enabled = true;
+
     private static PopupForm _popup = null!;
     private static readonly Yomitan Api = new();
 
@@ -79,6 +82,10 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // One instance only: a second tray icon and a second scanner would double every popup.
+        using var single = new Mutex(true, @"Local\Rosetta.SingleInstance", out bool first);
+        if (!first) return;
+
         Log.Enabled = args.Contains("--debug");
         if (Log.Enabled) AttachConsole(-1);   // WinForms has no console of its own
         try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* no console attached */ }
@@ -94,6 +101,12 @@ internal static class Program
         _ = _popup.Handle;
         _popup.WebMessage += OnWebMessage;
         Log.Write("popup handle created on UI thread");
+
+        Enabled = Settings.LoadEnabled();
+        using var tray = new Tray(
+            Enabled,
+            on => { Enabled = on; Settings.SaveEnabled(on); },
+            Application.Exit);
 
         // NFR-05. UIA runs on its own STA thread so a hung target app can never block
         // the UI thread - the popup stays responsive even when Word stops answering.
@@ -128,6 +141,13 @@ internal static class Program
         while (true)
         {
             if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) { Hide(); Thread.Sleep(50); continue; }
+
+            if (!Enabled)
+            {
+                if (_popup.Visible) Hide();
+                Thread.Sleep(100);
+                continue;
+            }
 
             // Poll typing on EVERY iteration, before anything can short-circuit. The
             // previous version checked this only inside the Shift branch, so ordinary
@@ -406,9 +426,25 @@ internal static class Program
         }
     }
 
-    private static bool IsPepe(string term) =>
-        term.Trim().Equals("pepe", StringComparison.OrdinalIgnoreCase) ||
-        term.Trim() == "ぺぺ";
+    /// <summary>
+    /// Exact match on the whole term, never a substring. Normalising first (NFKC) folds
+    /// full-width and half-width forms; for Latin text, diacritics are then stripped so
+    /// "Pepe", "PEPE", "ｐｅｐｅ", "pépé" and "pepé" all match, and for Japanese
+    /// ぺぺ (hiragana) and ペペ (katakana) both match. The diacritic strip is NOT applied
+    /// to Japanese, because it would reduce ぺ to へ.
+    /// </summary>
+    private static bool IsPepe(string term)
+    {
+        string t = term.Trim().Normalize(System.Text.NormalizationForm.FormKC);
+        if (t == "ぺぺ" || t == "ペペ") return true;
+
+        var sb = new System.Text.StringBuilder(t.Length);
+        foreach (char c in t.Normalize(System.Text.NormalizationForm.FormD))
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) !=
+                System.Globalization.UnicodeCategory.NonSpacingMark)
+                sb.Append(c);
+        return sb.ToString().Equals("pepe", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string? LangNameOf(int profile) => profile switch
     {
@@ -445,6 +481,14 @@ internal static class Program
                 _currentHtml = html;
                 Log.Write($"back -> depth {History.Count}");
                 ShowHtmlOnly(html);
+                return;
+            }
+
+            if (action == "open")
+            {
+                // The URL is fixed here on purpose: the page is not trusted to choose it.
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    "https://www.joselopezchapa.com") { UseShellExecute = true });
                 return;
             }
 
