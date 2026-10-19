@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/rosetta-banner.png" alt="Rosetta" width="420">
+  <img src="assets/rosetta-floppy.png" alt="Rosetta" width="360">
 </p>
 
 A system-wide pop-up dictionary for Windows. Hold Shift, hover a word in a native desktop app, and see a Yomitan-style dictionary popup — the same experience Yomitan gives you in the browser.
@@ -17,6 +17,8 @@ First targets: Microsoft Word (desktop), Microsoft Teams (new desktop client) an
 5. A non-focus-stealing WebView2 popup shows the result next to the word.
 
 Rosetta reads real on-screen text. It is not an OCR tool for games, images or video.
+
+> **Online feature:** selected-text translation is the one part that is **not local**: it sends the text you select to Google Translate when you hold Ctrl over it. You can untick it in the installer or switch it off from the tray at any time. See [Online translation](#online-translation-not-local).
 
 > **Important:** Rosetta does not contain a dictionary. Lookups are answered by the Yomitan extension running inside **Microsoft Edge**, so Edge must be open whenever you use Rosetta (see below).
 
@@ -57,10 +59,11 @@ Skip this if someone already gave you `Rosetta-Setup.exe`.
 ### B. Run the installer
 
 1. Double-click `Rosetta-Setup.exe`. No admin rights are needed. If Windows SmartScreen warns about an unknown publisher, click **More info > Run anyway** (the installer is not code-signed).
-2. Click **Next** through the pages. Leave **Start Rosetta when I sign in to Windows** ticked if you want it to start automatically.
-3. Click **Finish** with **Launch Rosetta** ticked.
-4. Find Rosetta in the notification area: click the **^** (*Show hidden icons*) arrow next to the clock. You should see the Rosetta crystal icon.
-   - **Right-click** it for the menu: **Enabled** (on/off), **Start with Windows**, **Exit**.
+2. The first page after the welcome screen is a notice that **translation is not local**. Read it, then click **Next** through the pages.
+3. On the *Select Additional Tasks* page, **Enable ONLINE translation** is **ticked** by default and **Start Rosetta when I sign in to Windows** is **unticked**. Untick the translation box if you do not want selected text ever sent to Google; tick the start-up box if you want Rosetta to launch with Windows.
+4. Click **Finish** with **Launch Rosetta** ticked.
+5. Find Rosetta in the notification area: click the **^** (*Show hidden icons*) arrow next to the clock. You should see the Rosetta crystal icon.
+   - **Right-click** it for the menu: **Enabled** (on/off), **Translate selection (online)** (on/off), **Translate to** (English, Japanese or Spanish), **Start with Windows**, **Exit**.
    - **Double-click** it to switch Rosetta on or off quickly. The tooltip says which state it is in.
    - To keep the icon always visible, drag it from the overflow onto the taskbar, or use *Settings > Personalization > Taskbar > Other system tray icons*.
 
@@ -180,6 +183,36 @@ Rosetta is for native apps (Word, Teams, PDF viewers); it never needs your main 
 | "the profileIndex patch is not live" | Edge is running the stock Yomitan; reload the unpacked build from `tools/yomitan-patched` |
 | Wrong language for a word | Profiles are not in the order Japanese, English, Spanish |
 | Nothing happens on Shift | Rosetta is switched off in the tray menu |
+| Ctrl over a selection does nothing | **Translate selection (online)** is off in the tray menu, or the pointer is not on the selected text |
+| "Translation unavailable" | No internet, or Google is limiting requests; wait a moment and try again |
+
+## Online translation (not local)
+
+> **Reminder: translation is not local.** Everything else in Rosetta runs on your PC, but translation sends the text you select over the internet to **Google Translate**. It needs a connection, Google receives the text, and it should not be used on confidential or private text. Nothing is sent unless you hold **Ctrl** over a selection while translation is on. Shift lookups never use the internet.
+
+Select some text (a few words, a sentence, several lines), then hold **Ctrl** with the pointer over the selection. You get a translation. **Shift** is still the dictionary key, so the two never collide: Shift looks up the word or short phrase under the pointer, Ctrl translates the selection.
+
+- Hold **Shift over any word in the translation** to look it up in the dictionary (nested lookup).
+- Click **Back** to return to the translation.
+- Click **Original** under the translation to see the source text.
+- The source language is detected automatically. If the text is already in your target language, Rosetta translates it to English (or Spanish, if your target is English).
+- Ctrl only does something over selected text; with nothing selected under the pointer it does nothing. While translation is off, Ctrl is just Ctrl.
+- Selections over 3000 characters are cut off, and the popup says so.
+
+### Setup
+
+There is nothing to install and no account or API key: Rosetta uses Google's free web endpoint.
+
+1. **Turn it on.** Either tick **Enable ONLINE translation** in the installer, or, any time later, click the **^** (*Show hidden icons*) arrow, right-click the Rosetta icon and tick **Translate selection (online)**. The first time, Windows shows a balloon reminding you that the text is sent to Google.
+2. **Choose the target language:** right-click the icon > **Translate to** > English, Japanese or Spanish (default English).
+3. **Use it:** select a sentence or paragraph in Word, Teams or a PDF, then hold **Ctrl** with the pointer over the selected text.
+4. **Turn it off** at any time by unticking **Translate selection (online)**. While it is off, long selections do nothing, exactly as before.
+
+### Good to know
+
+- **It is unofficial and not unlimited.** The endpoint has no key and no published quota. Google may throttle it, so an occasional "Translation unavailable" is normal; Rosetta retries briefly and you can simply try again. Google may also change or block it in the future.
+- **Offline:** you get "Translation unavailable". Dictionary lookups keep working without internet.
+- **Quality:** machine translation of whole passages, not dictionary-grade. Use the nested word lookup to check individual words.
 
 ## Patched backend
 
@@ -201,7 +234,7 @@ For the full installer, see [A. Build the installer](#a-build-the-installer). Ot
 dotnet build src\Rosetta -c Release                 # the app only, for quick testing
 src\Rosettain\Release
 et10.0-windows\Rosetta.exe --debug   # run it with a console trace
-python scripts\make-icon.py                        # regenerate the icon from assets\logo-source.png
+python scripts\make-icon.py                        # regenerate the icon from assetsosetta-floppy.png
 ```
 
 The icon script needs Pillow, NumPy and SciPy (`pip install pillow numpy scipy`).
@@ -212,7 +245,7 @@ The icon script needs Pillow, NumPy and SciPy (`pip install pillow numpy scipy`)
 | --- | --- |
 | `src/Rosetta/` | The application (WinForms, UI Automation, WebView2) |
 | `installer/` | Inno Setup script and build script |
-| `assets/` | Logo source, README banner, stone-only app icon (PNG and .ico) |
+| `assets/` | README banner (the floppy) and the app icon cut from it (PNG and .ico) |
 | `scripts/` | Asset tooling |
 | `patches/` | Upstream patch for Yomitan's API |
 | `spike/` | Early feasibility spike |

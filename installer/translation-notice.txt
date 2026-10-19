@@ -1,0 +1,14 @@
+IMPORTANT - ONE FEATURE IS NOT LOCAL
+
+Rosetta's dictionary lookups run on your own computer, through the Yomitan extension in Edge. Nothing you read leaves your PC.
+
+The one exception is the optional "Translate selection" feature:
+
+  * When you select text and hold Ctrl over it, the selected text is SENT OVER THE INTERNET to Google Translate (translate.googleapis.com) to be translated.
+  * It needs an internet connection. Offline, it simply shows "Translation unavailable".
+  * It uses Google's free endpoint without an account or key. That endpoint is unofficial: Google may limit it or change it at any time, and Google receives the text you translate.
+  * Do not use it on confidential or private text.
+
+Translation is ticked ON by default on the "Select Additional Tasks" page. Untick it there if you do not want it. You can switch it on or off at any time from the Rosetta tray icon (under "Show hidden icons"): right-click, then "Translate selection (online)".
+
+Single-word and short-phrase dictionary lookups never use the internet.

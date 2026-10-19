@@ -5,7 +5,11 @@ using FlaUI.UIA3;
 
 namespace Rosetta;
 
-internal sealed record Captured(string Span, string Term, Rectangle[] Rects, string Process);
+/// <param name="Translate">
+/// True when Term is a long or multi-line selection meant for translation rather than a
+/// dictionary lookup; Term is then the whole selected text.
+/// </param>
+internal sealed record Captured(string Span, string Term, Rectangle[] Rects, string Process, bool Translate = false);
 
 /// <summary>
 /// FR-04 / FR-05. Reads the text under the cursor through UI Automation.
@@ -18,6 +22,13 @@ internal sealed class Capture : IDisposable
 
     public Capture(int scanLength = 16) => _scanLength = scanLength;
 
+    /// <summary>
+    /// True while Ctrl is the scan key: the selection under the pointer is returned for
+    /// translation, and no word lookup is attempted. False (Shift) keeps the dictionary
+    /// behaviour exactly as it was. Set by the scan thread before each probe.
+    /// </summary>
+    public bool TranslateMode { get; set; }
+
     public Captured? At(Point pt)
     {
         var element = _automation.FromPoint(pt);
@@ -26,6 +37,19 @@ internal sealed class Capture : IDisposable
         string proc = "?";
         try { proc = System.Diagnostics.Process.GetProcessById(element.Properties.ProcessId.Value).ProcessName; }
         catch { /* the process can vanish mid-probe */ }
+
+        // A selection decides what the user wants, so look for it FIRST and on every text
+        // pattern from here up to the document. Without this, the nearest pattern (often a
+        // paragraph or span that knows nothing about the selection) answered with the word
+        // under the cursor, and the document-level pattern that actually holds the
+        // selection was never asked - so long selections fell through to a dictionary
+        // lookup.
+        if (TranslateMode)
+        {
+            // Ctrl means "translate what I selected". Hovering a bare word is not that,
+            // so there is deliberately no fallback to a dictionary lookup here.
+            return SelectionFromAncestors(element, pt, proc);
+        }
 
         // On Chromium-rendered content the element under the cursor is very often a
         // styled span or Group with no TextPattern, while the text itself lives on an
@@ -100,9 +124,10 @@ internal sealed class Capture : IDisposable
         return new Captured(nameSpan, term, [bounds], proc);
     }
 
-    // Selecting more than this is a translation request, not a dictionary lookup, so it
-    // is left alone rather than becoming an accidental query.
+    // Shift only looks up selections up to this long as one phrase; longer ones are for
+    // translation (Ctrl) and are ignored here.
     private const int MaxSelectionChars = 100;
+    private const int MaxTranslateChars = 3001;   // one over Translator.MaxChars, so truncation is detectable
 
     /// <summary>
     /// FR-15b. A selected phrase wins over the word under the cursor, so a two-word
@@ -110,6 +135,32 @@ internal sealed class Capture : IDisposable
     /// already holds, so there is no new mechanism and no new modifier - Shift is
     /// already carrying enough meaning.
     /// </summary>
+    private Captured? SelectionFromAncestors(AutomationElement element, Point pt, string proc)
+    {
+        try
+        {
+            var walker = _automation.TreeWalkerFactory.GetControlViewWalker();
+            AutomationElement? cur = element;
+            for (int depth = 0; depth <= 30 && cur is not null; depth++)
+            {
+                var pattern = cur.Patterns.Text.PatternOrDefault;
+                if (pattern is not null)
+                {
+                    var found = FromSelection(pattern, pt, proc);
+                    if (found is not null)
+                    {
+                        Log.Write($"    selection found on {cur.Properties.ControlType.ValueOrDefault} at depth {depth}");
+                        return found;
+                    }
+                    if (cur.Properties.ControlType.ValueOrDefault == ControlType.Document) break;
+                }
+                cur = walker.GetParent(cur);
+            }
+        }
+        catch { /* the tree can change under us mid-walk */ }
+        return null;
+    }
+
     private Captured? FromSelection(FlaUI.Core.Patterns.ITextPattern textPattern, Point pt, string proc)
     {
         try
@@ -117,16 +168,33 @@ internal sealed class Capture : IDisposable
             var selection = textPattern.GetSelection();
             if (selection is null || selection.Length == 0) return null;
 
-            string text = SanitizeSpan(selection[0].GetText(MaxSelectionChars + 1) ?? "");
-            if (text.Length == 0 || text.Length > MaxSelectionChars) return null;
-            if (!text.Contains(' ') && !Lang.IsJapanese(text)) return null;   // single word: ordinary path is better
+            string raw = (selection[0].GetText(TranslateMode ? MaxTranslateChars : MaxSelectionChars + 1) ?? "")
+                .Replace("\uFFFC", "").Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+            if (raw.Length == 0) return null;
+            Log.Write($"    selection: {raw.Length} chars, translateMode={TranslateMode}");
+
+            string text = SanitizeSpan(raw);
+            bool isPhrase = !TranslateMode;
+
+            if (isPhrase)
+            {
+                // Shift: the original phrase-lookup rule, unchanged.
+                if (text.Length > MaxSelectionChars) return null;
+                if (!text.Contains(' ') && !Lang.IsJapanese(text)) return null;   // single word: ordinary path is better
+            }
 
             var rects = selection[0].GetBoundingRectangles();
             // Only honour the selection when the cursor is actually inside it, otherwise
             // a stale selection elsewhere in the document would hijack every lookup.
-            if (!RectsContainX(rects, pt)) return null;
+            if (!SelectionContains(rects, pt))
+            {
+                Log.Write($"    selection ignored: cursor is outside its {rects.Length} rectangle(s)");
+                return null;
+            }
 
-            return new Captured(text, text, rects, proc);
+            return isPhrase
+                ? new Captured(text, text, rects, proc)
+                : new Captured(text, raw, rects, proc, Translate: true);
         }
         catch
         {
@@ -182,6 +250,23 @@ internal sealed class Capture : IDisposable
         }
 
         return new Captured(span, SanitizeTerm(span), range.GetBoundingRectangles(), proc);
+    }
+
+    /// <summary>
+    /// Like RectsContainX, but forgiving about the gap BETWEEN lines: a multi-line
+    /// selection comes back as one rectangle per line, and the pointer often rests in the
+    /// leading between two of them. That is still "on the selection" to the user.
+    /// </summary>
+    private static bool SelectionContains(Rectangle[] rects, Point pt)
+    {
+        if (rects.Length == 0) return true;
+        foreach (var r in rects)
+        {
+            var box = r;
+            box.Inflate(4, 8);
+            if (box.Contains(pt)) return true;
+        }
+        return false;
     }
 
     private static bool RectsContainX(Rectangle[] rects, Point pt)

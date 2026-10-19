@@ -7,6 +7,7 @@ namespace Rosetta;
 internal static class Program
 {
     private const int VK_SHIFT = 0x10;
+    private const int VK_CONTROL = 0x11;
     private const int VK_ESCAPE = 0x1B;
     private const int VK_LBUTTON = 0x01;
 
@@ -66,9 +67,6 @@ internal static class Program
     // so Shift effectively never sits alone this long while writing.
     private const int ShiftDwellMs = 200;
 
-    /// <summary>Toggled from the tray menu; the scan loop idles while false.</summary>
-    internal static volatile bool Enabled = true;
-
     private static PopupForm _popup = null!;
     private static readonly Yomitan Api = new();
 
@@ -102,11 +100,8 @@ internal static class Program
         _popup.WebMessage += OnWebMessage;
         Log.Write("popup handle created on UI thread");
 
-        Enabled = Settings.LoadEnabled();
-        using var tray = new Tray(
-            Enabled,
-            on => { Enabled = on; Settings.SaveEnabled(on); },
-            Application.Exit);
+        Settings.Load();
+        using var tray = new Tray(Application.Exit);
 
         // NFR-05. UIA runs on its own STA thread so a hung target app can never block
         // the UI thread - the popup stays responsive even when Word stops answering.
@@ -142,7 +137,7 @@ internal static class Program
         {
             if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) { Hide(); Thread.Sleep(50); continue; }
 
-            if (!Enabled)
+            if (!Settings.Enabled)
             {
                 if (_popup.Visible) Hide();
                 Thread.Sleep(100);
@@ -165,7 +160,14 @@ internal static class Program
                 if (_popup.Visible) Hide();
             }
 
-            bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            // Shift looks a word up in the dictionary. Ctrl translates the selection, and
+            // only counts while translation is switched on; with it off, Ctrl is just Ctrl.
+            // Everything below that tracks "the scan key is held" (dwell, typing guard,
+            // click-to-dismiss) treats the two keys alike.
+            bool shiftKey = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool ctrlKey = Settings.Translate && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            bool shift = shiftKey || ctrlKey;
+            bool translateMode = ctrlKey && !shiftKey;
 
             if (shift && !shiftWasDown)
             {
@@ -209,6 +211,9 @@ internal static class Program
             // nested lookup from here - the page cannot see Shift for itself.
             if (_popup.ContainsScreenPoint(pt))
             {
+                // Nested lookups are a dictionary action, so they stay on Shift.
+                if (!shiftKey) { Thread.Sleep(25); continue; }
+
                 if (pt != _lastNestedProbe)
                 {
                     _lastNestedProbe = pt;
@@ -254,7 +259,7 @@ internal static class Program
                 if (!shownForCurrentWord && rest.ElapsedMilliseconds >= RestDelayMs)
                 {
                     shownForCurrentWord = true;
-                    Probe(capture, pt);
+                    Probe(capture, pt, translateMode);
                 }
                 Thread.Sleep(10);
                 continue;
@@ -330,9 +335,10 @@ internal static class Program
         }
     }
 
-    private static void Probe(Capture capture, Point pt)
+    private static void Probe(Capture capture, Point pt, bool translateMode)
     {
         Captured? cap;
+        capture.TranslateMode = translateMode;
         try { cap = capture.At(pt); }
         catch (Exception ex) { Log.Write($"capture threw {ex.GetType().Name}: {ex.Message}"); return; }
 
@@ -358,6 +364,12 @@ internal static class Program
         try
         {
             var anchor = PickAnchor(cap.Rects, pt);
+
+            if (cap.Translate)
+            {
+                await TranslateAndShowAsync(cap, anchor, pt, ct);
+                return;
+            }
 
             if (IsPepe(cap.Term))
             {
@@ -444,6 +456,36 @@ internal static class Program
                 System.Globalization.UnicodeCategory.NonSpacingMark)
                 sb.Append(c);
         return sb.ToString().Equals("pepe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Online translation of a selection. Shown in two steps like a lookup: a "Translating"
+    /// placeholder at once, then the result. The result page is ordinary text, so holding
+    /// Shift over a word in it runs the normal nested lookup, and Back returns here.
+    /// </summary>
+    private static async Task TranslateAndShowAsync(Captured cap, Rectangle anchor, Point pt, CancellationToken ct)
+    {
+        Log.Write($"  translate {cap.Term.Length} chars -> {Settings.Target}");
+        _lastTerm = cap.Term;
+        Show(Html.Message("Translating...", "Google Translate - online"), anchor, pt);
+
+        string text = cap.Term;
+        bool truncated = text.Length > Translator.MaxChars;
+        if (truncated) text = text[..Translator.MaxChars];
+
+        var result = await Translator.TranslateAsync(text, Settings.Target, ct);
+        if (ct.IsCancellationRequested) return;
+        if (_lastTerm != cap.Term) return;
+        if (History.Count != 0) return;        // a nested lookup started meanwhile
+
+        if (result is null)
+        {
+            Show(Html.Message("Translation unavailable",
+                "Check your internet connection. Google may also be limiting requests - try again in a moment."),
+                anchor, pt);
+            return;
+        }
+        Show(Html.Translation(text, result, truncated), anchor, pt);
     }
 
     private static string? LangNameOf(int profile) => profile switch
